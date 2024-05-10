@@ -54,13 +54,24 @@ class RPCError(Exception):
     """
 
 
-class AuthCredentialsError(ValueError):
+class RPCSendError(Exception):
     """
-    Exception when the auth credentials provided
-    are not in the correct format
+    Exception when sending message to client.
+
+    When raised from zmqrpc, sending can be retried or RPC can be reestablished.
     """
 
-    pass
+
+class RPCReceiveError(Exception):
+    """
+    Exception when receiving message from client is interrupted or message is corrupted.
+
+    When raised from zmqrpc, client connection should be reestablished.
+    """
+
+    def __init__(self, *args: object, addr=None) -> None:
+        super().__init__(*args)
+        self.addr = addr
 
 
 class RunnerAlreadyExistsError(Exception):

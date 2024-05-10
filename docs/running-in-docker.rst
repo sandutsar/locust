@@ -10,6 +10,9 @@ Use it like this (assuming that the ``locustfile.py`` exists in the current work
 
     docker run -p 8089:8089 -v $PWD:/mnt/locust locustio/locust -f /mnt/locust/locustfile.py
 
+On Windows, this command will sometimes cause errors. Windows users should try using this instead::
+
+    docker run -p 8089:8089 --mount type=bind,source=$pwd,target=/mnt/locust locustio/locust -f /mnt/locust/locustfile.py
 
 Docker Compose
 ==============
@@ -23,7 +26,6 @@ The above compose configuration could be used to start a master node and 4 worke
 
     docker-compose up --scale worker=4
 
-
 Use docker image as a base image
 ================================
 
@@ -33,12 +35,7 @@ official Locust docker image as a base image::
     FROM locustio/locust
     RUN pip3 install some-python-package
 
+Running Locust using Kubernetes
+===============================
 
-Running a distributed load test on Kubernetes
-=============================================
-
-The easiest way to run Locust on Kubernetes is to use a `Helm chart <https://helm.sh/>`_
-
-There is a good helm chart here: `github.com/deliveryhero/helm-charts <https://github.com/deliveryhero/helm-charts/tree/master/stable/locust>`_
-
-Note: this Helm chart is a separate project, and not supported by Locust maintainers.
+See [Extensions](https://github.com/locustio/locust/wiki/Extensions#helm) in the wiki.

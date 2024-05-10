@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 #
 # This file is execfile()d with the current directory set to its containing dir.
 #
@@ -8,17 +7,19 @@
 # All configuration values have a default value; values that are commented out
 # serve to show the default value.
 
+from locust.argument_parser import get_empty_argument_parser, setup_parser_arguments
+
 import os
 import subprocess
 
-from locust.argument_parser import get_empty_argument_parser, setup_parser_arguments
+import sphinx_rtd_theme
 
 
 # Run command `locust --help` and store output in cli-help-output.txt which is included in the docs
 def save_locust_help_output():
     cli_help_output_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), "cli-help-output.txt")
-    print("Running `locust --help` command and storing output in %s" % cli_help_output_file)
-    help_output = subprocess.check_output(["locust", "--help"]).decode("utf-8")
+    print(f"Running `locust --help` command and storing output in {cli_help_output_file}")
+    help_output = subprocess.check_output(["locust", "--help"], text=True)
     with open(cli_help_output_file, "w") as f:
         f.write(help_output)
 
@@ -30,19 +31,17 @@ save_locust_help_output()
 
 def save_locust_env_variables():
     env_options_output_file = os.path.join(os.path.abspath(os.path.dirname(__file__)), "config-options.rst")
-    print("Generating RST table for Locust environment variables and storing in %s" % env_options_output_file)
+    print(f"Generating RST table for Locust environment variables and storing in {env_options_output_file}")
     parser = get_empty_argument_parser()
     setup_parser_arguments(parser)
     table_data = []
     for action in parser._actions:
-        if action.env_var:
+        if action.env_var and action.help != "==SUPPRESS==":
             table_data.append(
                 (
-                    ", ".join(["``%s``" % c for c in action.option_strings]),
-                    "``%s``" % action.env_var,
-                    ", ".join(
-                        ["``%s``" % c for c in parser.get_possible_config_keys(action) if not c.startswith("--")]
-                    ),
+                    ", ".join([f"``{c}``" for c in action.option_strings]),
+                    f"``{action.env_var}``",
+                    ", ".join([f"``{c}``" for c in parser.get_possible_config_keys(action) if not c.startswith("--")]),
                     action.help,
                 )
             )
@@ -84,6 +83,7 @@ extensions = [
     "sphinx_substitution_extensions",
     "sphinx.ext.autodoc",
     "sphinx.ext.intersphinx",
+    "sphinx.ext.viewcode",
     "sphinx_search.extension",
 ]
 
@@ -144,16 +144,8 @@ exclude_dirnames = []
 
 html_show_sourcelink = False
 html_file_suffix = ".html"
-
-
-# on_rtd is whether we are on readthedocs.org, this line of code grabbed from docs.readthedocs.org
-on_rtd = os.environ.get("READTHEDOCS", None) == "True"
-
-if not on_rtd:  # only import and set the theme if we're building docs locally
-    import sphinx_rtd_theme
-
-    html_theme = "sphinx_rtd_theme"
-    html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
+html_theme = "sphinx_rtd_theme"
+html_theme_path = [sphinx_rtd_theme.get_html_theme_path()]
 
 
 # Custom CSS overrides

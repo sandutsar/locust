@@ -47,15 +47,12 @@ def constant_pacing(wait_time):
     """
 
     def wait_time_func(self):
-        if not hasattr(self, "_cp_last_run"):
-            self._cp_last_wait_time = wait_time
-            self._cp_last_run = time()
-            return wait_time
-        else:
-            run_time = time() - self._cp_last_run - self._cp_last_wait_time
-            self._cp_last_wait_time = max(0, wait_time - run_time)
-            self._cp_last_run = time()
-            return self._cp_last_wait_time
+        if not hasattr(self, "_cp_last_wait_time"):
+            self._cp_last_wait_time = 0
+        run_time = time() - self._cp_last_run - self._cp_last_wait_time
+        self._cp_last_wait_time = max(0, wait_time - run_time)
+        self._cp_last_run = time()
+        return self._cp_last_wait_time
 
     return wait_time_func
 
@@ -64,7 +61,7 @@ def constant_throughput(task_runs_per_second):
     """
     Returns a function that will track the run time of the tasks, and for each time it's
     called it will return a wait time that will try to make the number of task runs per second
-    execution equal to the time specified by the task_runs_per_secondd argument.
+    execution equal to the time specified by the task_runs_per_second argument.
 
     If you have multiple requests in a task your RPS will of course be higher than the
     specified throughput.

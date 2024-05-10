@@ -15,6 +15,12 @@ HttpUser class
 .. autoclass:: locust.HttpUser
     :members: wait_time, tasks, client, abstract
 
+FastHttpUser class
+==================
+
+.. autoclass:: locust.contrib.fasthttp.FastHttpUser
+    :members: wait_time, tasks, client, abstract, rest
+    :noindex:
 
 TaskSet class
 =============
@@ -56,11 +62,11 @@ HttpSession class
 Response class
 ==============
 
-This class actually resides in the `python-requests <http://python-requests.org>`_ library, 
+This class actually resides in the `requests <https://requests.readthedocs.io/>`_ library, 
 since that's what Locust is using to make HTTP requests, but it's included in the API docs 
 for locust since it's so central when writing locust load tests. You can also look at the 
 :py:class:`Response <requests.Response>` class at the 
-`requests documentation <http://python-requests.org>`_.
+`requests documentation <https://requests.readthedocs.io/>`_.
 
 .. autoclass:: requests.Response
     :inherited-members:
@@ -114,6 +120,7 @@ EventHook class
 The event hooks are instances of the **locust.events.EventHook** class:
 
 .. autoclass:: locust.event.EventHook
+    :members:
 
 .. note::
 
@@ -133,7 +140,7 @@ Runner classes
     :members: register_message, send_message
 
 .. autoclass:: locust.runners.WorkerRunner
-    :members: register_message, send_message
+    :members: register_message, send_message, client_id, worker_index
 
 Web UI class
 ============
@@ -144,7 +151,12 @@ Web UI class
 Other
 =====
 
-.. autoclass:: locust.stats.StatsEntry
+.. autoclass:: locust.shape.LoadTestShape
     :members:
+
+.. autoclass:: locust.stats.RequestStats
+    :members: get
+
+.. autoclass:: locust.stats.StatsEntry
 
 .. autofunction:: locust.debug.run_single_user

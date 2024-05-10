@@ -1,23 +1,49 @@
+from __future__ import annotations
+
+from locust.exception import InterruptTaskSet, MissingWaitTimeError, RescheduleTask, RescheduleTaskImmediately, StopUser
+
 import logging
 import random
-import sys
 import traceback
+from collections import deque
 from time import time
-from typing import Any, Callable, List, Union
-from typing_extensions import final
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Protocol,
+    TypeVar,
+    final,
+    overload,
+    runtime_checkable,
+)
 
 import gevent
 from gevent import GreenletExit
 
-from locust.exception import InterruptTaskSet, RescheduleTask, RescheduleTaskImmediately, StopUser, MissingWaitTimeError
+if TYPE_CHECKING:
+    from locust import User
 
 
 logger = logging.getLogger(__name__)
+TaskT = TypeVar("TaskT", Callable[..., None], type["TaskSet"])
 
 LOCUST_STATE_RUNNING, LOCUST_STATE_WAITING, LOCUST_STATE_STOPPING = ["running", "waiting", "stopping"]
 
 
-def task(weight=1):
+@runtime_checkable
+class TaskHolder(Protocol[TaskT]):
+    tasks: list[TaskT]
+
+
+@overload
+def task(weight: TaskT) -> TaskT: ...
+
+
+@overload
+def task(weight: int) -> Callable[[TaskT], TaskT]: ...
+
+
+def task(weight: TaskT | int = 1) -> TaskT | Callable[[TaskT], TaskT]:
     """
     Used as a convenience decorator to be able to declare tasks for a User or a TaskSet
     inline in the class. Example::
@@ -30,6 +56,16 @@ def task(weight=1):
             @task(7)
             def create_thread(self):
                 pass
+
+            @task(25)
+            class ForumThread(TaskSet):
+                @task
+                def get_author(self):
+                    pass
+
+                @task
+                def get_created(self):
+                    pass
     """
 
     def decorator_func(func):
@@ -48,7 +84,7 @@ def task(weight=1):
     Check if task was used without parentheses (not called), like this::
 
         @task
-        def my_task()
+        def my_task(self)
             pass
     """
     if callable(weight):
@@ -59,7 +95,7 @@ def task(weight=1):
         return decorator_func
 
 
-def tag(*tags):
+def tag(*tags: str) -> Callable[[TaskT], TaskT]:
     """
     Decorator for tagging tasks and TaskSets with the given tag name. You can
     then limit the test to only execute tasks that are tagged with any of the
@@ -129,7 +165,12 @@ def get_tasks_from_base_classes(bases, class_dict):
     return new_tasks
 
 
-def filter_tasks_by_tags(task_holder, tags=None, exclude_tags=None, checked=None):
+def filter_tasks_by_tags(
+    task_holder: type[TaskHolder],
+    tags: set[str] | None = None,
+    exclude_tags: set[str] | None = None,
+    checked: dict[TaskT, bool] | None = None,
+):
     """
     Function used by Environment to recursively remove any tasks/TaskSets from a TaskSet/User that
     shouldn't be executed according to the tag options
@@ -159,6 +200,8 @@ def filter_tasks_by_tags(task_holder, tags=None, exclude_tags=None, checked=None
         checked[task] = passing
 
     task_holder.tasks = new_tasks
+    if not new_tasks:
+        logging.warning(f"{task_holder.__name__} had no tasks left after filtering, instantiating it will fail!")
 
 
 class TaskSetMeta(type):
@@ -172,7 +215,7 @@ class TaskSetMeta(type):
         return type.__new__(mcs, classname, bases, class_dict)
 
 
-class TaskSet(object, metaclass=TaskSetMeta):
+class TaskSet(metaclass=TaskSetMeta):
     """
     Class defining a set of tasks that a User will execute.
 
@@ -191,7 +234,7 @@ class TaskSet(object, metaclass=TaskSetMeta):
     will then continue in the first TaskSet).
     """
 
-    tasks: List[Union["TaskSet", Callable]] = []
+    tasks: list[TaskSet | Callable] = []
     """
     Collection of python callables and/or TaskSet classes that the User(s) will run.
 
@@ -206,7 +249,7 @@ class TaskSet(object, metaclass=TaskSetMeta):
             tasks = {ThreadPage:15, write_post:1}
     """
 
-    min_wait = None
+    min_wait: float | None = None
     """
     Deprecated: Use wait_time instead.
     Minimum waiting time between the execution of user tasks. Can be used to override
@@ -214,7 +257,7 @@ class TaskSet(object, metaclass=TaskSetMeta):
     TaskSet.
     """
 
-    max_wait = None
+    max_wait: float | None = None
     """
     Deprecated: Use wait_time instead.
     Maximum waiting time between the execution of user tasks. Can be used to override
@@ -230,11 +273,11 @@ class TaskSet(object, metaclass=TaskSetMeta):
     if not set on the TaskSet.
     """
 
-    _user = None
-    _parent = None
+    _user: User
+    _parent: User
 
-    def __init__(self, parent):
-        self._task_queue = []
+    def __init__(self, parent: User) -> None:
+        self._task_queue: deque = deque()
         self._time_start = time()
 
         if isinstance(parent, TaskSet):
@@ -251,9 +294,10 @@ class TaskSet(object, metaclass=TaskSetMeta):
             self.max_wait = self.user.max_wait
         if not self.wait_function:
             self.wait_function = self.user.wait_function
+        self._cp_last_run = time()  # used by constant_pacing wait_time
 
     @property
-    def user(self):
+    def user(self) -> User:
         """:py:class:`User <locust.User>` instance that this TaskSet was created by"""
         return self._user
 
@@ -262,7 +306,7 @@ class TaskSet(object, metaclass=TaskSetMeta):
         """Parent TaskSet instance of this TaskSet (or :py:class:`User <locust.User>` if this is not a nested TaskSet)"""
         return self._parent
 
-    def on_start(self):
+    def on_start(self) -> None:
         """
         Called when a User starts executing this TaskSet
         """
@@ -301,13 +345,21 @@ class TaskSet(object, metaclass=TaskSetMeta):
                 else:
                     self.wait()
             except InterruptTaskSet as e:
-                self.on_stop()
+                try:
+                    self.on_stop()
+                except (StopUser, GreenletExit):
+                    raise
+                except Exception:
+                    logging.error("Uncaught exception in on_stop: \n%s", traceback.format_exc())
                 if e.reschedule:
                     raise RescheduleTaskImmediately(e.reschedule) from e
                 else:
                     raise RescheduleTask(e.reschedule) from e
             except (StopUser, GreenletExit):
-                self.on_stop()
+                try:
+                    self.on_stop()
+                except Exception:
+                    logging.error("Uncaught exception in on_stop: \n%s", traceback.format_exc())
                 raise
             except Exception as e:
                 self.user.environment.events.user_error.fire(user_instance=self, exception=e, tb=e.__traceback__)
@@ -318,7 +370,7 @@ class TaskSet(object, metaclass=TaskSetMeta):
                     raise
 
     def execute_next_task(self):
-        self.execute_task(self._task_queue.pop(0))
+        self.execute_task(self._task_queue.popleft())
 
     def execute_task(self, task):
         # check if the function is a method bound to the current locust, and if so, don't pass self as first argument
@@ -340,14 +392,18 @@ class TaskSet(object, metaclass=TaskSetMeta):
         :param first: Optional keyword argument. If True, the task will be put first in the queue.
         """
         if first:
-            self._task_queue.insert(0, task_callable)
+            self._task_queue.appendleft(task_callable)
         else:
             self._task_queue.append(task_callable)
 
     def get_next_task(self):
         if not self.tasks:
+            if getattr(self, "task", None):
+                extra_message = ", but you have set a 'task' attribute - maybe you meant to set 'tasks'?"
+            else:
+                extra_message = "."
             raise Exception(
-                f"No tasks defined on {self.__class__.__name__}. use the @task decorator or set the tasks property of the TaskSet"
+                f"No tasks defined on {self.__class__.__name__}{extra_message} use the @task decorator or set the 'tasks' attribute of the TaskSet"
             )
         return random.choice(self.tasks)
 
@@ -367,11 +423,7 @@ class TaskSet(object, metaclass=TaskSetMeta):
             return random.randint(self.min_wait, self.max_wait) / 1000.0
         else:
             raise MissingWaitTimeError(
-                "You must define a wait_time method on either the %s or %s class"
-                % (
-                    type(self.user).__name__,
-                    type(self).__name__,
-                )
+                "You must define a wait_time method on either the {type(self.user).__name__} or {type(self).__name__} class"
             )
 
     def wait(self):
@@ -420,8 +472,12 @@ class DefaultTaskSet(TaskSet):
 
     def get_next_task(self):
         if not self.user.tasks:
+            if getattr(self.user, "task", None):
+                extra_message = ", but you have set a 'task' attribute on your class - maybe you meant to set 'tasks'?"
+            else:
+                extra_message = "."
             raise Exception(
-                f"No tasks defined on {self.user.__class__.__name__}. use the @task decorator or set the tasks property of the User (or mark it as abstract = True if you only intend to subclass it)"
+                f"No tasks defined on {self.user.__class__.__name__}{extra_message} Use the @task decorator or set the 'tasks' attribute of the User (or mark it as abstract = True if you only intend to subclass it)"
             )
         return random.choice(self.user.tasks)
 

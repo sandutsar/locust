@@ -2,23 +2,27 @@
 # which is very useful for fetching test data.
 #
 # 1. Locustfile parse time
-# 2. Locust start
+# 2. Locust start (init)
 # 3. Test start
 # 4. User start
 # 5. Inside a task
 # ...
-# 6. User stop
-# 7. Test run stop
-# 8. (not shown in this example) Locust quit
+# 6. Test run stopping
+# 7. User stop
+# 8. Test run stop
+# (3-8 are repeated if you restart the test in the UI)
+# 9. Locust quitting
+# 10. Locust quit
 #
 # try it out by running:
 #  locust -f test_data_management.py --headless -u 2 -t 5
-from locust.user.wait_time import constant
-from locust import HttpUser, task
-from locust import events
+from locust import HttpUser, events, task
 from locust.runners import MasterRunner
-import requests
+from locust.user.wait_time import constant
+
 import datetime
+
+import requests
 
 
 def timestring():
@@ -38,17 +42,17 @@ test_run_specific_data = None
 
 
 @events.init.add_listener
-def _(environment, **_kwargs):
+def init(environment, **_kwargs):
     print("2. Initializing locust, happens after parsing the locustfile but before test start")
 
 
 @events.quitting.add_listener
-def _(environment, **_kwargs):
-    print("locust is shutting down")
+def quitting(environment, **_kwargs):
+    print("9. locust is about to shut down")
 
 
 @events.test_start.add_listener
-def _(environment, **_kwargs):
+def test_start(environment, **_kwargs):
     # happens only once in headless runs, but can happen multiple times in web ui-runs
     global test_run_specific_data
     print("3. Starting test run")
@@ -60,16 +64,34 @@ def _(environment, **_kwargs):
         ).json()["data"]
 
 
+@events.quit.add_listener
+def quit(exit_code, **kwargs):
+    print(f"10. Locust has shut down with code {exit_code}")
+
+
+@events.test_stopping.add_listener
+def test_stopping(environment, **_kwargs):
+    print("6. stopping test run")
+
+
 @events.test_stop.add_listener
-def _(environment, **_kwargs):
-    print("stopping test run")
+def test_stop(environment, **_kwargs):
+    print("8. test run stopped")
 
 
 class MyUser(HttpUser):
     host = "https://postman-echo.com"
     wait_time = constant(180)  # be nice to postman-echo
+    first_start = True
 
     def on_start(self):
+        if MyUser.first_start:
+            MyUser.first_start = False
+            # This is useful for similar things as to test_start, but happens in the context of a User
+            # In the case of a distributed run, this would be run once per worker.
+            # It will not be re-run on repeated runs (unless you clear the first_start flag)
+            print("X. Here's where you would put things you want to run the first time a User is started")
+
         print("4. A user was started")
         # This is a good place to fetch user-specific test data. It is executed once per User
         # If you do not want the request logged, you can replace self.client.<method> with requests.<method>
@@ -94,4 +116,4 @@ class MyUser(HttpUser):
 
     def on_stop(self):
         # this is a good place to clean up/release any user-specific test data
-        print("a user was stopped")
+        print("7. a user was stopped")

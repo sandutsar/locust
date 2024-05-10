@@ -1,16 +1,37 @@
+from __future__ import annotations
+
 import time
-from typing import Optional, Tuple
+from abc import ABCMeta, abstractmethod
+from typing import TYPE_CHECKING, ClassVar
+
 from .runners import Runner
 
+if TYPE_CHECKING:
+    from . import User
 
-class LoadTestShape:
+
+class LoadTestShapeMeta(ABCMeta):
     """
-    A simple load test shape class used to control the shape of load generated
-    during a load test.
+    Meta class for the main User class. It's used to allow User classes to specify task execution
+    ratio using an {task:int} dict, or a [(task0,int), ..., (taskN,int)] list.
     """
 
-    runner: Runner = None
+    def __new__(mcs, classname, bases, class_dict):
+        class_dict["abstract"] = class_dict.get("abstract", False)
+        return super().__new__(mcs, classname, bases, class_dict)
+
+
+class LoadTestShape(metaclass=LoadTestShapeMeta):
+    """
+    Base class for custom load shapes.
+    """
+
+    runner: Runner | None = None
     """Reference to the :class:`Runner <locust.runners.Runner>` instance"""
+
+    abstract: ClassVar[bool] = True
+
+    use_common_options: ClassVar[bool] = False
 
     def __init__(self):
         self.start_time = time.perf_counter()
@@ -33,15 +54,16 @@ class LoadTestShape:
         """
         return self.runner.user_count
 
-    def tick(self) -> Optional[Tuple[int, float]]:
+    @abstractmethod
+    def tick(self) -> tuple[int, float] | tuple[int, float, list[type[User]] | None] | None:
         """
         Returns a tuple with 2 elements to control the running load test:
 
             user_count -- Total user count
             spawn_rate -- Number of users to start/stop per second when changing number of users
+            user_classes -- None or a List of userclasses to be spawned in it tick
 
         If `None` is returned then the running load test will be stopped.
 
         """
-
-        return None
+        ...

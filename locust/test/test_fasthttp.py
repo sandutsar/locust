@@ -1,14 +1,19 @@
+from locust import FastHttpUser
+from locust.argument_parser import parse_options
+from locust.contrib.fasthttp import FastHttpSession
+from locust.exception import CatchResponseError, InterruptTaskSet, LocustError, ResponseError
+from locust.user import TaskSet, task
+from locust.util.load_locustfile import is_user_class
+
 import socket
-import gevent
 import time
 from tempfile import NamedTemporaryFile
 
-from locust.user import task, TaskSet
-from locust.contrib.fasthttp import FastHttpSession
-from locust import FastHttpUser
-from locust.exception import CatchResponseError, InterruptTaskSet, LocustError, ResponseError
-from locust.main import is_user_class
-from .testcases import WebserverTestCase, LocustTestCase
+import gevent
+from geventhttpclient.client import HTTPClientPool
+from pyquery import PyQuery as pq
+
+from .testcases import LocustTestCase, WebserverTestCase
 from .util import create_tls_cert
 
 
@@ -23,12 +28,15 @@ class TestFastHttpSession(WebserverTestCase):
 
     def test_connection_error(self):
         s = FastHttpSession(self.environment, "http://localhost:1", user=None)
-        r = s.get("/", timeout=0.1)
+        r = s.get("/", headers={"X-Test-Headers": "hello"})
         self.assertEqual(r.status_code, 0)
         self.assertEqual(None, r.content)
         self.assertEqual(1, len(self.runner.stats.errors))
         self.assertTrue(isinstance(r.error, ConnectionRefusedError))
         self.assertTrue(isinstance(next(iter(self.runner.stats.errors.values())).error, ConnectionRefusedError))
+        self.assertEqual(r.url, "http://localhost:1/")
+        self.assertEqual(r.request.url, r.url)
+        self.assertEqual(r.request.headers.get("X-Test-Headers", ""), "hello")
 
     def test_404(self):
         s = self.get_client()
@@ -42,6 +50,8 @@ class TestFastHttpSession(WebserverTestCase):
         self.assertEqual(204, r.status_code)
         self.assertEqual(1, self.runner.stats.get("/status/204", "GET").num_requests)
         self.assertEqual(0, self.runner.stats.get("/status/204", "GET").num_failures)
+        self.assertEqual(r.url, "http://127.0.0.1:%i/status/204" % self.port)
+        self.assertEqual(r.request.url, r.url)
 
     def test_streaming_response(self):
         """
@@ -62,10 +72,32 @@ class TestFastHttpSession(WebserverTestCase):
         # download the content of the streaming response (so we don't get an ugly exception in the log)
         _ = r.content
 
+    def test_streaming_response_catch_response(self):
+        """
+        Test a request to an endpoint that returns a streaming response, and uses catch_response
+        """
+        s = self.get_client()
+
+        with s.get("/streaming/30", stream=True, catch_response=True) as r:
+            # typical usage of r when stream=True is to read the stream as desired,
+            # with the possibility to "fail fast" when some things are read early on
+            response_content = str(r.stream.read())
+            r.failure("some error")
+
+        self.assertRegex(response_content, "streaming response")
+
+        stats = self.runner.stats.get("/streaming/30", "GET")
+        self.assertEqual(1, stats.num_requests)
+        self.assertEqual(1, stats.num_failures)
+
+        # verify that response time does NOT include whole download time, when using stream=True
+        self.assertGreaterEqual(stats.avg_response_time, 0)
+        self.assertLess(stats.avg_response_time, 250)
+
     def test_slow_redirect(self):
         s = self.get_client()
         url = "/redirect?url=/redirect&delay=0.5"
-        r = s.get(url)
+        s.get(url)
         stats = self.runner.stats.get(url, method="GET")
         self.assertEqual(1, stats.num_requests)
         self.assertGreater(stats.avg_response_time, 500)
@@ -86,6 +118,7 @@ class TestFastHttpSession(WebserverTestCase):
         self.assertEqual(200, r.status_code)
         r = s.get("/get_cookie?name=testcookie")
         self.assertEqual("1337", r.content.decode())
+        self.assertEqual("1337", r.text)
 
     def test_head(self):
         s = self.get_client()
@@ -111,7 +144,7 @@ class TestFastHttpSession(WebserverTestCase):
         self.assertEqual(200, r.status_code)
         self.assertEqual("", r.content.decode())
         self.assertEqual(
-            set(["OPTIONS", "DELETE", "PUT", "GET", "POST", "HEAD", "PATCH"]),
+            {"OPTIONS", "DELETE", "PUT", "GET", "POST", "HEAD", "PATCH"},
             set(r.headers["allow"].split(", ")),
         )
 
@@ -119,6 +152,8 @@ class TestFastHttpSession(WebserverTestCase):
         s = self.get_client()
         r = s.post("/request_method", json={"foo": "bar"})
         self.assertEqual(200, r.status_code)
+        self.assertEqual(r.request.body, '{"foo": "bar"}')
+        self.assertEqual(r.request.headers.get("Content-Type"), "application/json")
 
     def test_catch_response_fail_successful_request(self):
         s = self.get_client()
@@ -153,7 +188,7 @@ class TestFastHttpSession(WebserverTestCase):
             with s.get("/fail", catch_response=True) as r:
                 r.success()
                 raise OtherException("wtf")
-        except OtherException as e:
+        except OtherException:
             pass
         else:
             self.fail("OtherException should have been raised")
@@ -163,14 +198,14 @@ class TestFastHttpSession(WebserverTestCase):
 
     def test_catch_response_default_success(self):
         s = self.get_client()
-        with s.get("/ultra_fast", catch_response=True) as r:
+        with s.get("/ultra_fast", catch_response=True):
             pass
         self.assertEqual(1, self.environment.stats.get("/ultra_fast", "GET").num_requests)
         self.assertEqual(0, self.environment.stats.get("/ultra_fast", "GET").num_failures)
 
     def test_catch_response_default_fail(self):
         s = self.get_client()
-        with s.get("/fail", catch_response=True) as r:
+        with s.get("/fail", catch_response=True):
             pass
         self.assertEqual(1, self.environment.stats.total.num_requests)
         self.assertEqual(1, self.environment.stats.total.num_failures)
@@ -192,6 +227,58 @@ class TestFastHttpSession(WebserverTestCase):
         self.assertAlmostEqual(after_request, kwargs["start_time"] + kwargs["response_time"] / 1000, delta=0.01)
         self.assertEqual(s.base_url + "/wrong_url/01", kwargs["url"])  # url is unaffected by name
         self.assertDictEqual({"foo": "bar"}, kwargs["context"])
+
+    def test_custom_ssl_context_fail_with_bad_context(self):
+        """
+        Test FastHttpSession with a custom SSLContext factory that will fail as
+        we can not set verify_mode to CERT_NONE when check_hostname is enabled
+        """
+
+        def create_custom_context():
+            context = gevent.ssl.create_default_context()
+            context.check_hostname = True
+            context.verify_mode = gevent.ssl.CERT_NONE
+            return context
+
+        s = FastHttpSession(
+            self.environment,
+            "https://127.0.0.1:%i" % self.port,
+            ssl_context_factory=create_custom_context,
+            user=None,
+        )
+        with self.assertRaises(ValueError) as e:
+            s.get("/")
+        self.assertEqual(e.exception.args, ("Cannot set verify_mode to CERT_NONE when check_hostname is enabled.",))
+
+    def test_custom_ssl_context_passed_correct_to_client_pool(self):
+        """
+        Test FastHttpSession with a custom SSLContext factory with a options.name
+        that will be passed correctly to the ClientPool. It will also test a 2nd
+        factory which is not the correct one.
+        """
+
+        def custom_ssl_context():
+            context = gevent.ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = gevent.ssl.CERT_NONE
+            context.options.name = "FAKEOPTION"
+            return context
+
+        def custom_context_with_wrong_option():
+            context = gevent.ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = gevent.ssl.CERT_NONE
+            context.options.name = "OPTIONFAKED"
+            return context
+
+        s = FastHttpSession(
+            self.environment,
+            "https://127.0.0.1:%i" % self.port,
+            ssl_context_factory=custom_ssl_context,
+            user=None,
+        )
+        self.assertEqual(s.client.clientpool.client_args["ssl_context_factory"], custom_ssl_context)
+        self.assertNotEqual(s.client.clientpool.client_args["ssl_context_factory"], custom_context_with_wrong_option)
 
 
 class TestRequestStatsWithWebserver(WebserverTestCase):
@@ -215,7 +302,7 @@ class TestRequestStatsWithWebserver(WebserverTestCase):
 
         l = MyUser(self.environment)
         path = "/no_content_length"
-        r = l.client.get(path)
+        l.client.get(path)
         self.assertEqual(
             self.runner.stats.get(path, "GET").avg_content_length,
             len("This response does not have content-length in the header"),
@@ -227,7 +314,7 @@ class TestRequestStatsWithWebserver(WebserverTestCase):
 
         l = MyUser(self.environment)
         path = "/no_content_length"
-        r = l.client.get(path, stream=True)
+        l.client.get(path, stream=True)
         self.assertEqual(0, self.runner.stats.get(path, "GET").avg_content_length)
 
     def test_request_stats_named_endpoint(self):
@@ -259,7 +346,7 @@ class TestRequestStatsWithWebserver(WebserverTestCase):
             host = "http://localhost:1"
 
         locust = MyUser(self.environment)
-        response = locust.client.get("/", timeout=0.1)
+        response = locust.client.get("/")
         self.assertEqual(response.status_code, 0)
         self.assertEqual(1, self.runner.stats.get("/", "GET").num_failures)
         self.assertEqual(1, self.runner.stats.get("/", "GET").num_requests)
@@ -310,7 +397,10 @@ class TestFastHttpUserClass(WebserverTestCase):
             host = "http://127.0.0.1:%i" % self.port
 
         locust = MyUser(self.environment)
-        self.assertEqual("hello", locust.client.get("/request_header_test", headers={"X-Header-Test": "hello"}).text)
+        r = locust.client.get("/request_header_test", headers={"X-Header-Test": "hello"})
+        self.assertEqual("hello", r.text)
+        self.assertEqual("hello", r.headers.get("X-Header-Test"))
+        self.assertEqual("hello", r.request.headers.get("X-Header-Test"))
 
     def test_client_get(self):
         class MyUser(FastHttpUser):
@@ -356,6 +446,16 @@ class TestFastHttpUserClass(WebserverTestCase):
 
         locust = MyUser(self.environment)
         self.assertEqual(200, locust.client.head("/request_method").status_code)
+
+    def test_complex_content_type(self):
+        class MyUser(FastHttpUser):
+            host = "http://127.0.0.1:%i" % self.port
+
+        locust = MyUser(self.environment)
+
+        self.assertEqual("stuff", locust.client.get("/content_type_missing_charset").text)
+        self.assertEqual("stuff", locust.client.get("/content_type_regular").text)
+        self.assertEqual("stuff", locust.client.get("/content_type_with_extra_stuff").text)
 
     def test_log_request_name_argument(self):
         self.response = ""
@@ -407,7 +507,7 @@ class TestFastHttpUserClass(WebserverTestCase):
 
     def test_max_redirect_setting(self):
         class MyUser(FastHttpUser):
-            max_redirects = 1  # max_redirects and max_retries are funny names, because they are actually max attempts
+            max_redirects = 0
             host = "http://127.0.0.1:%i" % self.port
 
         l = MyUser(self.environment)
@@ -420,14 +520,14 @@ class TestFastHttpUserClass(WebserverTestCase):
 
         l = MyLocust(self.environment)
         resp = l.client.get("/redirect", allow_redirects=False)
-        self.assertEqual("http://127.0.0.1:%i/ultra_fast" % self.port, resp.headers["location"])
+        self.assertTrue(resp.headers["location"].endswith("/ultra_fast"))
         resp = l.client.get("/redirect")  # ensure redirect still works
         self.assertFalse("location" in resp.headers)
 
     def test_slow_redirect(self):
         s = FastHttpSession(self.environment, "http://127.0.0.1:%i" % self.port, user=None)
         url = "/redirect?url=/redirect&delay=0.5"
-        r = s.get(url)
+        s.get(url)
         stats = self.runner.stats.get(url, method="GET")
         self.assertEqual(1, stats.num_requests)
         self.assertGreater(stats.avg_response_time, 500)
@@ -450,6 +550,66 @@ class TestFastHttpUserClass(WebserverTestCase):
         self.assertEqual("Authorized", response.text)
         self.assertEqual(401, locust.client.get("/basic_auth").status_code)
         self.assertEqual(401, unauthorized.client.get("/basic_auth").status_code)
+
+    def test_shared_client_pool(self):
+        shared_client_pool = HTTPClientPool(concurrency=1)
+
+        class MyUserA(FastHttpUser):
+            host = "http://127.0.0.1:%i" % self.port
+            client_pool = shared_client_pool
+
+        class MyUserB(FastHttpUser):
+            host = "http://127.0.0.1:%i" % self.port
+            client_pool = shared_client_pool
+
+        user_a = MyUserA(self.environment)
+        user_b = MyUserB(self.environment)
+
+        user_a.client.get("/ultra_fast")
+        user_b.client.get("/ultra_fast")
+        user_b.client.get("/ultra_fast")
+        user_a.client.get("/ultra_fast")
+
+        self.assertEqual(1, self.connections_count)
+        self.assertEqual(4, self.requests_count)
+
+    def test_client_pool_per_user_instance(self):
+        class MyUser(FastHttpUser):
+            host = "http://127.0.0.1:%i" % self.port
+
+        user_a = MyUser(self.environment)
+        user_b = MyUser(self.environment)
+
+        user_a.client.get("/ultra_fast")
+        user_b.client.get("/ultra_fast")
+        user_b.client.get("/ultra_fast")
+        user_a.client.get("/ultra_fast")
+
+        self.assertEqual(2, self.connections_count)
+        self.assertEqual(4, self.requests_count)
+
+    def test_client_pool_concurrency(self):
+        class MyUser(FastHttpUser):
+            host = "http://127.0.0.1:%i" % self.port
+
+            @task
+            def t(self):
+                def concurrent_request(url):
+                    response = self.client.get(url)
+                    assert response.status_code == 200
+
+                pool = gevent.pool.Pool()
+                urls = ["/slow?delay=0.2"] * 20  # these urls are all the same, but they could be different
+                for url in urls:
+                    pool.spawn(concurrent_request, url)
+                pool.join()
+
+        user = MyUser(self.environment)
+        before_requests = time.time()
+        user.t()
+        after_requests = time.time()
+        expected_delta = 0.4  # 20 requests with concurrency 10 and response time 0.2
+        self.assertAlmostEqual(before_requests + expected_delta, after_requests, delta=0.1)
 
 
 class TestFastHttpCatchResponse(WebserverTestCase):
@@ -491,7 +651,7 @@ class TestFastHttpCatchResponse(WebserverTestCase):
         self.assertEqual(1, self.num_success)
 
     def test_catch_response_http_fail(self):
-        with self.user.client.get("/fail", catch_response=True) as response:
+        with self.user.client.get("/fail", catch_response=True):
             pass
         self.assertEqual(1, self.num_failures)
         self.assertEqual(0, self.num_success)
@@ -524,7 +684,7 @@ class TestFastHttpCatchResponse(WebserverTestCase):
         class MyTaskSet(TaskSet):
             @task
             def interrupted_task(self):
-                with self.client.get("/ultra_fast", catch_response=True) as r:
+                with self.client.get("/ultra_fast", catch_response=True):
                     raise InterruptTaskSet()
 
         class MyUser(FastHttpUser):
@@ -567,29 +727,29 @@ class TestFastHttpCatchResponse(WebserverTestCase):
         self.assertRaises(LocustError, r.success)
         self.assertRaises(LocustError, r.failure, "")
 
-    def test_deprecated_request_events(self):
-        status = {"success_amount": 0, "failure_amount": 0}
-
-        def on_success(**kw):
-            status["success_amount"] += 1
-
-        def on_failure(**kw):
-            status["failure_amount"] += 1
-
-        self.environment.events.request_success.add_listener(on_success)
-        self.environment.events.request_failure.add_listener(on_failure)
-        with self.user.client.get("/ultra_fast", catch_response=True) as response:
-            pass
-        with self.user.client.get("/wrong_url", catch_response=True) as response:
-            pass
-
-        self.assertEqual(1, status["success_amount"])
-        self.assertEqual(1, status["failure_amount"])
-
     def test_missing_catch_response_true(self):
         # incorrect usage, missing catch_response=True
         with self.user.client.get("/fail") as resp:
             self.assertRaises(LocustError, resp.success)
+
+    def test_rest_success(self):
+        self.last_failure_exception = None
+        with self.user.rest("POST", "/rest", json={"foo": "bar"}) as response:
+            assert response.js["foo"] == "bar"
+
+        self.assertEqual(0, self.num_failures)
+        self.assertEqual(1, self.num_success)
+
+    def test_rest_fail(self):
+        with self.user.rest("POST", "/rest", json={"foo": "bar"}) as response:
+            assert response.js["foo"] == "NOPE"
+
+        self.assertTrue(
+            isinstance(self.last_failure_exception, CatchResponseError),
+            "Failure event handler should have been passed a CatchResponseError instance",
+        )
+        self.assertEqual(1, self.num_failures)
+        self.assertEqual(0, self.num_success)
 
 
 class TestFastHttpSsl(LocustTestCase):
@@ -618,7 +778,8 @@ class TestFastHttpSsl(LocustTestCase):
 
     def test_ssl_request_insecure(self):
         s = FastHttpSession(self.environment, "https://127.0.0.1:%i" % self.web_port, insecure=True, user=None)
-        r = s.get("/")
-        self.assertEqual(200, r.status_code)
-        self.assertIn("<title>Locust for None</title>", r.content.decode("utf-8"))
-        self.assertIn("<p>Script: <span>None</span></p>", r.text)
+        response = s.get("/")
+        d = pq(response.content.decode("utf-8"))
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn('"users": null', str(d))

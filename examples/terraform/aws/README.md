@@ -1,3 +1,4 @@
+## This doesnt seem to work right now for some people. See https://github.com/locustio/locust/issues/2357
 
 ## 1. AWS Authentication
 
@@ -53,7 +54,7 @@ terraform apply --auto-approve
 
 Click on the link below to access the UI:
 
-Result exemple:
+Result example:
 
 ```bash
 Apply complete! Resources: 14 added, 0 changed, 0 destroyed.

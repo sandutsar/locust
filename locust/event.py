@@ -1,7 +1,14 @@
+from __future__ import annotations
+
 import logging
-from . import log
+import time
 import traceback
-from .exception import StopUser, RescheduleTask, RescheduleTaskImmediately, InterruptTaskSet
+from collections.abc import Generator
+from contextlib import contextmanager
+from typing import Any
+
+from . import log
+from .exception import InterruptTaskSet, RescheduleTask, RescheduleTaskImmediately, StopUser
 
 
 class EventHook:
@@ -46,6 +53,39 @@ class EventHook:
                 logging.error("Uncaught exception in event handler: \n%s", traceback.format_exc())
                 log.unhandled_greenlet_exception = True
 
+    @contextmanager
+    def measure(
+        self, request_type: str, name: str, response_length: int = 0, context=None
+    ) -> Generator[dict[str, Any], None, None]:
+        """Convenience method for firing the event with automatically calculated response time and automatically marking the request as failed if an exception is raised (this is really only useful for the *request* event)
+
+        Example usage (in a task):
+
+            with self.environment.events.request.measure("myrequestType", "myRequestName") as request_meta:
+                # do the stuff you want to measure
+
+        You can optionally add/overwrite entries in the request_meta dict and they will be passed to the request event.
+
+        Experimental.
+        """
+        start_time = time.time()
+        start_perf_counter = time.perf_counter()
+        request_meta = {
+            "request_type": request_type,
+            "name": name,
+            "response_length": response_length,
+            "context": context or {},
+            "exception": None,
+            "start_time": start_time,
+        }
+        try:
+            yield request_meta
+        except Exception as e:
+            request_meta["exception"] = e
+        finally:
+            request_meta["response_time"] = (time.perf_counter() - start_perf_counter) * 1000
+            self.fire(**request_meta)
+
 
 class DeprecatedEventHook(EventHook):
     def __init__(self, message):
@@ -60,7 +100,7 @@ class DeprecatedEventHook(EventHook):
 class Events:
     request: EventHook
     """
-    Fired when a request in completed, successful or unsuccessful. This event is typically used to report requests when writing custom clients for locust.
+    Fired when a request in completed.
 
     Event arguments:
 
@@ -71,33 +111,8 @@ class Events:
     :param response: Response object (e.g. a :py:class:`requests.Response`)
     :param context: :ref:`User/request context <request_context>`
     :param exception: Exception instance that was thrown. None if request was successful.
-    """
 
-    request_success: DeprecatedEventHook
-    """
-    DEPRECATED. Fired when a request is completed successfully. This event is typically used to report requests
-    when writing custom clients for locust.
-
-    Event arguments:
-
-    :param request_type: Request type method used
-    :param name: Path to the URL that was called (or override name if it was used in the call to the client)
-    :param response_time: Response time in milliseconds
-    :param response_length: Content-length of the response
-    """
-
-    request_failure: DeprecatedEventHook
-    """
-    DEPRECATED. Fired when a request fails. This event is typically used to report failed requests when writing
-    custom clients for locust.
-
-    Event arguments:
-
-    :param request_type: Request type method used
-    :param name: Path to the URL that was called (or override name if it was used in the call to the client)
-    :param response_time: Time in milliseconds until exception was thrown
-    :param response_length: Content-length of the response
-    :param exception: Exception instance that was thrown
+    If you want to simplify a custom client, you can have Locust measure the time for you by using :meth:`measure() <locust.event.EventHook.measure>`
     """
 
     user_error: EventHook
@@ -138,6 +153,13 @@ class Events:
     :param data: Data dict with the data from the worker node
     """
 
+    worker_connect: EventHook
+    """
+    Fired on master when a new worker connects. Note that is fired immediately after the connection is established, so init event may not yet have finished on worker.
+
+    :param client_id: Client id of the connected worker
+    """
+
     spawning_complete: EventHook
     """
     Fired when all simulated users has been spawned.
@@ -149,19 +171,27 @@ class Events:
 
     quitting: EventHook
     """
-    Fired when the locust process is exiting
+    Fired when the locust process is exiting.
 
     Event arguments:
 
     :param environment: Environment instance
     """
 
+    quit: EventHook
+    """
+    Fired after quitting events, just before process is exited.
+
+    Event arguments:
+
+    :param exit_code: Exit code for process
+    """
+
     init: EventHook
     """
     Fired when Locust is started, once the Environment instance and locust runner instance
     have been created. This hook can be used by end-users' code to run code that requires access to
-    the Environment. For example to register listeners to request_success, request_failure
-    or other events.
+    the Environment. For example to register listeners to other events.
 
     Event arguments:
 
@@ -183,6 +213,11 @@ class Events:
     users change during a test.
     """
 
+    test_stopping: EventHook
+    """
+    Fired on each node when a load test is about to stop - before stopping users.
+    """
+
     test_stop: EventHook
     """
     Fired on each node when a load test is stopped.
@@ -193,37 +228,17 @@ class Events:
     Fired when the Reset Stats button is clicked in the web UI.
     """
 
+    cpu_warning: EventHook
+    """
+    Fired when the CPU usage exceeds runners.CPU_WARNING_THRESHOLD (90% by default)
+    """
+
     def __init__(self):
-        # For backwarde compatiblilty use also values of class attributes
+        # For backward compatibility use also values of class attributes
         for name, value in vars(type(self)).items():
-            if value == EventHook:
-                setattr(self, name, value())
+            if value == "EventHook":
+                setattr(self, name, EventHook())
 
         for name, value in self.__annotations__.items():
-            if value == EventHook:
-                setattr(self, name, value())
-
-        self.request_success = DeprecatedEventHook("request_success event deprecated. Use the request event.")
-
-        self.request_failure = DeprecatedEventHook("request_failure event deprecated. Use the request event.")
-
-        def fire_deprecated_request_handlers(
-            request_type, name, response_time, response_length, exception, context, **kwargs
-        ):
-            if exception:
-                self.request_failure.fire(
-                    request_type=request_type,
-                    name=name,
-                    response_time=response_time,
-                    response_length=response_length,
-                    exception=exception,
-                )
-            else:
-                self.request_success.fire(
-                    request_type=request_type,
-                    name=name,
-                    response_time=response_time,
-                    response_length=response_length,
-                )
-
-        self.request.add_listener(fire_deprecated_request_handlers)
+            if value == "EventHook":
+                setattr(self, name, EventHook())

@@ -1,5 +1,7 @@
-import logging
 from locust.exception import LocustError
+
+import logging
+
 from .task import TaskSet, TaskSetMeta
 
 
@@ -55,7 +57,7 @@ class SequentialTaskSet(TaskSet, metaclass=SequentialTaskSetMeta):
     def get_next_task(self):
         if not self.tasks:
             raise LocustError(
-                "No tasks defined. use the @task decorator or set the tasks property of the SequentialTaskSet"
+                "No tasks defined. Use the @task decorator or set the 'tasks' attribute of the SequentialTaskSet"
             )
         task = self.tasks[self._task_index % len(self.tasks)]
         self._task_index += 1

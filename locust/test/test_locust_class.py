@@ -1,11 +1,17 @@
+from locust import HttpUser, TaskSet, User, constant, task
+from locust.env import Environment
+from locust.exception import (
+    CatchResponseError,
+    InterruptTaskSet,
+    RescheduleTask,
+    RescheduleTaskImmediately,
+    ResponseError,
+    StopUser,
+)
+
 import gevent
 from gevent import sleep
 from gevent.pool import Group
-
-from locust.exception import InterruptTaskSet, ResponseError
-from locust import HttpUser, User, TaskSet, task, constant
-from locust.env import Environment
-from locust.exception import CatchResponseError, RescheduleTask, RescheduleTaskImmediately, StopUser
 
 from .testcases import LocustTestCase, WebserverTestCase
 
@@ -46,6 +52,8 @@ class TestTaskSet(LocustTestCase):
         self.assertRaisesRegex(Exception, "No tasks defined on MyTasks.*", l.run)
         l.tasks = []
         self.assertRaisesRegex(Exception, "No tasks defined on MyTasks.*", l.run)
+        MyTasks.task = object()
+        self.assertRaisesRegex(Exception, ".*but you have set a 'task' attribute.*", l.run)
 
     def test_tasks_missing_from_user_gives_user_friendly_exception(self):
         class MyUser(User):
@@ -53,6 +61,8 @@ class TestTaskSet(LocustTestCase):
 
         l = MyUser(self.environment)
         self.assertRaisesRegex(Exception, "No tasks defined on MyUser.*", l.run)
+        MyUser.task = object()
+        self.assertRaisesRegex(Exception, ".*but you have set a 'task' attribute.*", l.run)
 
     def test_task_decorator_ratio(self):
         t1 = lambda l: None
@@ -738,19 +748,19 @@ class TestCatchResponse(WebserverTestCase):
         self.assertEqual(1, self.num_failures)
         self.assertEqual(0, self.num_success)
 
-        with self.locust.client.get("/ultra_fast", catch_response=True) as response:
+        with self.locust.client.get("/ultra_fast", catch_response=True):
             pass
         self.assertEqual(1, self.num_failures)
         self.assertEqual(1, self.num_success)
 
-        with self.locust.client.get("/ultra_fast", catch_response=True) as response:
+        with self.locust.client.get("/ultra_fast", catch_response=True):
             raise ResponseError("Not working")
 
         self.assertEqual(2, self.num_failures)
         self.assertEqual(1, self.num_success)
 
     def test_catch_response_http_fail(self):
-        with self.locust.client.get("/fail", catch_response=True) as response:
+        with self.locust.client.get("/fail", catch_response=True):
             pass
         self.assertEqual(1, self.num_failures)
         self.assertEqual(0, self.num_success)
@@ -783,7 +793,7 @@ class TestCatchResponse(WebserverTestCase):
         class MyTaskSet(TaskSet):
             @task
             def interrupted_task(self):
-                with self.client.get("/ultra_fast", catch_response=True) as r:
+                with self.client.get("/ultra_fast", catch_response=True):
                     raise InterruptTaskSet()
 
         class MyUser(HttpUser):

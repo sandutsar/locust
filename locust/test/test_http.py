@@ -1,10 +1,11 @@
-import time
-
-from locust.user.users import HttpUser
-from requests.exceptions import InvalidSchema, InvalidURL, MissingSchema, RequestException
-
 from locust.clients import HttpSession
 from locust.exception import LocustError, ResponseError
+from locust.user.users import HttpUser
+
+import time
+
+from requests.exceptions import InvalidSchema, InvalidURL, MissingSchema, RequestException
+
 from .testcases import WebserverTestCase
 
 
@@ -40,7 +41,7 @@ class TestHttpSession(WebserverTestCase):
             try:
                 self.assertRaises(exception, s.get, "/")
             except KeyError:
-                self.fail("Invalid URL %s was not propagated" % url)
+                self.fail(f"Invalid URL {url} was not propagated")
 
     def test_streaming_response(self):
         """
@@ -64,7 +65,7 @@ class TestHttpSession(WebserverTestCase):
     def test_slow_redirect(self):
         s = self.get_client()
         url = "/redirect?url=/redirect&delay=0.5"
-        r = s.get(url)
+        s.get(url)
         stats = self.runner.stats.get(url, method="GET")
         self.assertEqual(1, stats.num_requests)
         self.assertGreater(stats.avg_response_time, 500)
@@ -104,7 +105,7 @@ class TestHttpSession(WebserverTestCase):
         self.assertEqual(200, r.status_code)
         self.assertEqual("", r.content.decode())
         self.assertEqual(
-            set(["OPTIONS", "DELETE", "PUT", "GET", "POST", "HEAD", "PATCH"]),
+            {"OPTIONS", "DELETE", "PUT", "GET", "POST", "HEAD", "PATCH"},
             set(r.headers["allow"].split(", ")),
         )
 
@@ -144,23 +145,6 @@ class TestHttpSession(WebserverTestCase):
         self.assertEqual("GET", kwargs["response"].text)
         s.request("get", "/wrong_url")
         self.assertEqual("Not Found", kwargs["response"].text)
-
-    def test_deprecated_request_events(self):
-        s = self.get_client()
-        status = {"success_amount": 0, "failure_amount": 0}
-
-        def on_success(**kw):
-            status["success_amount"] += 1
-
-        def on_failure(**kw):
-            status["failure_amount"] += 1
-
-        self.environment.events.request_success.add_listener(on_success)
-        self.environment.events.request_failure.add_listener(on_failure)
-        s.request("get", "/request_method")
-        s.request("get", "/wrong_url")
-        self.assertEqual(1, status["success_amount"])
-        self.assertEqual(1, status["failure_amount"])
 
     def test_error_message_with_name_replacement(self):
         s = self.get_client()
@@ -233,7 +217,7 @@ class TestHttpSession(WebserverTestCase):
             with s.get("/fail", catch_response=True) as r:
                 r.success()
                 raise OtherException("wtf")
-        except OtherException as e:
+        except OtherException:
             pass
         else:
             self.fail("OtherException should have been raised")
@@ -244,9 +228,9 @@ class TestHttpSession(WebserverTestCase):
     def test_catch_response_response_error(self):
         s = self.get_client()
         try:
-            with s.get("/fail", catch_response=True) as r:
+            with s.get("/fail", catch_response=True):
                 raise ResponseError("response error")
-        except ResponseError as e:
+        except ResponseError:
             self.fail("ResponseError should not have been raised")
 
         self.assertEqual(1, self.environment.stats.total.num_requests)
@@ -254,17 +238,33 @@ class TestHttpSession(WebserverTestCase):
 
     def test_catch_response_default_success(self):
         s = self.get_client()
-        with s.get("/ultra_fast", catch_response=True) as r:
+        with s.get("/ultra_fast", catch_response=True):
             pass
         self.assertEqual(1, self.environment.stats.get("/ultra_fast", "GET").num_requests)
         self.assertEqual(0, self.environment.stats.get("/ultra_fast", "GET").num_failures)
 
     def test_catch_response_default_fail(self):
         s = self.get_client()
-        with s.get("/fail", catch_response=True) as r:
+        with s.get("/fail", catch_response=True):
             pass
         self.assertEqual(1, self.environment.stats.total.num_requests)
         self.assertEqual(1, self.environment.stats.total.num_failures)
+
+    def test_catch_response_with_name_replacement(self):
+        s = self.get_client()
+        kwargs = {}
+
+        def on_request(**kw):
+            self.assertIsNotNone(kw["exception"])
+            kwargs.update(kw)
+
+        self.environment.events.request.add_listener(on_request)
+
+        with s.get("/wrong_url/01", name="replaced_url_name"):
+            pass
+
+        self.assertIn("for url: replaced_url_name", str(kwargs["exception"]))
+        self.assertEqual(s.base_url + "/wrong_url/01", kwargs["url"])  # url is unaffected by name
 
     def test_catch_response_missing_with_block(self):
         s = self.get_client()
@@ -278,6 +278,29 @@ class TestHttpSession(WebserverTestCase):
         # incorrect usage, missing catch_response=True
         with s.get("/fail") as resp:
             self.assertRaises(LocustError, resp.success)
+
+    def test_event_measure(self):
+        kwargs = {}
+
+        def on_request(**kw):
+            kwargs.update(**kw)
+
+        self.environment.events.request.add_listener(on_request)
+
+        with self.environment.events.request.measure("GET", "/test") as request_meta:
+            time.sleep(0.001)
+
+        self.assertTrue(1 <= kwargs["response_time"] <= 1.5, kwargs["response_time"])
+        self.assertEqual(kwargs["name"], "/test")
+        self.assertIsNone(kwargs["exception"])
+
+        with self.environment.events.request.measure("GET", "/test") as request_meta:
+            request_meta["foo"] = "bar"
+            raise Exception("nooo")
+
+        self.assertEqual(kwargs["name"], "/test")
+        self.assertEqual(kwargs["foo"], "bar")
+        self.assertEqual(str(kwargs["exception"]), "nooo")
 
     def test_user_context(self):
         class TestUser(HttpUser):

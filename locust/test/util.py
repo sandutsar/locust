@@ -1,24 +1,22 @@
+import datetime
 import functools
 import gc
 import os
 import socket
 import warnings
-
-from datetime import datetime, timedelta
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-
 from contextlib import contextmanager
 from tempfile import NamedTemporaryFile
 
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+
 
 @contextmanager
-def temporary_file(content, suffix="_locustfile.py"):
-    f = NamedTemporaryFile(suffix=suffix, delete=False)
+def temporary_file(content, suffix="_locustfile.py", dir=None):
+    f = NamedTemporaryFile(suffix=suffix, delete=False, dir=dir)
     f.write(content.encode("utf-8"))
     f.close()
     try:
@@ -57,7 +55,7 @@ def create_tls_cert(hostname):
     """Generate a TLS cert and private key to serve over https"""
     key = rsa.generate_private_key(public_exponent=2**16 + 1, key_size=2048, backend=default_backend())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
-    now = datetime.utcnow()
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
         .subject_name(name)
@@ -65,7 +63,7 @@ def create_tls_cert(hostname):
         .public_key(key.public_key())
         .serial_number(1000)
         .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=10 * 365))
+        .not_valid_after(now + datetime.timedelta(days=10 * 365))
         .sign(key, hashes.SHA256(), default_backend())
     )
     cert_pem = cert.public_bytes(encoding=serialization.Encoding.PEM)
@@ -79,13 +77,12 @@ def create_tls_cert(hostname):
 
 
 def clear_all_functools_lru_cache() -> None:
-    # Somehow, the code below throws unrelated DeprecationWarning related to Flask.
-    # We mute the warnings in order to not pollute the logs when running the tests.
-    with warnings.catch_warnings(record=True):
-        # Clear all `functools.lru_cache` to ensure that no state are persisted from one test to another.
-        # Taken from https://stackoverflow.com/a/50699209.
+    # Clear all `functools.lru_cache` to ensure that no state are persisted from one test to another.
+    # Taken from https://stackoverflow.com/a/50699209.
+    with warnings.catch_warnings():
+        warnings.simplefilter(action="ignore", category=ResourceWarning)
         gc.collect()
-        wrappers = [a for a in gc.get_objects() if isinstance(a, functools._lru_cache_wrapper)]
-        assert len(wrappers) > 0
-        for wrapper in wrappers:
-            wrapper.cache_clear()
+    wrappers = [a for a in gc.get_objects() if isinstance(a, functools._lru_cache_wrapper)]
+    assert len(wrappers) > 0
+    for wrapper in wrappers:
+        wrapper.cache_clear()
